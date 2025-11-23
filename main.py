@@ -3,7 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import numpy as np
 import cv2
+import os
 from mediapipe import solutions as mp
+from google import genai
+
+# --- GEMINI CLIENT INITIALIZATION ---
+# The client securely reads the GEMINI_API_KEY from your terminal environment.
+gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 app = FastAPI()
 
@@ -16,10 +22,12 @@ app.add_middleware(
 )
 
 # Initialize MediaPipe models
-mp_pose = mp.pose.Pose(static_image_mode=False, model_complexity=1)
+mp_pose = mp.pose.Pose(static_image_mode=False, model_complexity=1) 
 mp_face = mp.face_mesh.FaceMesh(static_image_mode=False, refine_landmarks=True)
 
+# Helper function to determine head rotation (Yaw) and tilt (Pitch)
 def head_direction(landmarks):
+    # Landmarks for eyes (33, 263) and nose (1)
     left_eye = landmarks[33]
     right_eye = landmarks[263]
     nose = landmarks[1]
@@ -31,17 +39,83 @@ def head_direction(landmarks):
     pitch = (nose.y - (left_eye.y + right_eye.y)/2) * 100
     return yaw, pitch
 
-def detect_writing(body):
-    rw = body[mp.solutions.pose.PoseLandmark.RIGHT_WRIST]
-    rs = body[mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER]
-    motion = abs(rw.y - rs.y)
-    return (rw.y > rs.y and motion > 0.01)
-
+# Helper function to detect if eyes are closed
 def detect_sleep(face):
     top = face[159]
     bottom = face[145]
     eye_gap = abs(top.y - bottom.y)
     return eye_gap < 0.003
+
+# Helper function to detect if the student is in a writing posture (hand near desk area)
+def detect_writing_posture(body_landmarks):
+    try:
+        # Check Right Hand position (assuming right-handed writing)
+        rw = body_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_WRIST]
+        rs = body_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER]
+        rh = body_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_HIP]
+        
+        # Criteria 1: Right wrist is substantially below the right shoulder (lowered arm)
+        wrist_below_shoulder = rw.y > rs.y + 0.05 
+        
+        # Criteria 2: Right wrist is low enough to be near a desk (below the hip line)
+        wrist_low_position = rw.y > rh.y - 0.1 
+        
+        return wrist_below_shoulder and wrist_low_position
+    except (IndexError, AttributeError):
+        return False
+
+# Helper function to determine Sitting or Standing posture
+def detect_posture(body_landmarks):
+    if not body_landmarks:
+        return "Sitting (Occluded)"
+    
+    try:
+        # Get average normalized Y coordinates for key joints
+        hip_y = (body_landmarks[mp.solutions.pose.PoseLandmark.LEFT_HIP].y + 
+                 body_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_HIP].y) / 2
+        knee_y = (body_landmarks[mp.solutions.pose.PoseLandmark.LEFT_KNEE].y + 
+                  body_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_KNEE].y) / 2
+        ankle_y = (body_landmarks[mp.solutions.pose.PoseLandmark.LEFT_ANKLE].y + 
+                   body_landmarks[mp.solutions.pose.PoseLandmark.RIGHT_ANKLE].y) / 2
+    except (IndexError, AttributeError):
+        return "Sitting (Partial View)"
+
+    leg_length = ankle_y - hip_y
+    
+    # Standing criteria: long, visible leg length
+    if leg_length > 0.4:
+        return "Standing"
+        
+    # Sitting criteria: compact lower body or general upper-body view
+    if knee_y - hip_y < 0.15 or leg_length < 0.4:
+        return "Sitting"
+        
+    return "Unknown"
+
+# Core function: Associates a face with its closest body pose
+def find_closest_pose(face_landmarks, all_pose_landmarks):
+    if not all_pose_landmarks:
+        return None
+
+    face_nose = (face_landmarks[1].x, face_landmarks[1].y)
+    min_distance = float('inf')
+    closest_pose_landmarks = None
+    
+    for pose in all_pose_landmarks:
+        try:
+            pose_nose = (pose.landmark[mp.solutions.pose.PoseLandmark.NOSE].x, 
+                         pose.landmark[mp.solutions.pose.PoseLandmark.NOSE].y)
+        except (IndexError, AttributeError):
+            continue
+
+        distance = np.sqrt((face_nose[0] - pose_nose[0])**2 + (face_nose[1] - pose_nose[1])**2)
+        
+        # 0.05 is the normalized threshold for a match between face and body head positions
+        if distance < min_distance and distance < 0.05: 
+            min_distance = distance
+            closest_pose_landmarks = pose.landmark
+
+    return closest_pose_landmarks
 
 @app.post("/process-frame")
 async def process_frame(file: UploadFile = File(...)):
@@ -49,46 +123,116 @@ async def process_frame(file: UploadFile = File(...)):
     img = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+    # Perform detection
     pose_res = mp_pose.process(img_rgb)
     face_res = mp_face.process(img_rgb)
 
     result = {
         "students": [],
         "total": 0,
-        "focused": 0
+        "focused": 0,
+        "gemini_analysis": "Waiting for data..."
     }
 
-    if not pose_res.pose_landmarks:
+    all_pose_landmarks = pose_res.multi_pose_landmarks or []
+    
+    if not face_res.multi_face_landmarks:
         return result
 
-    body = pose_res.pose_landmarks.landmark
-    writing = detect_writing(body)
-    focus = True
+    focused_count = 0
 
-    if face_res.multi_face_landmarks:
-        face = face_res.multi_face_landmarks[0].landmark
+    # --- CORE MULTI-STUDENT LOGIC ---
+    for face_landmarks in face_res.multi_face_landmarks:
+        
+        face = face_landmarks.landmark
+        focus = True
+        is_writing = False
+        
+        # 1. Association and Posture
+        body = find_closest_pose(face, all_pose_landmarks)
+        posture = detect_posture(body) if body else "Sitting (No Pose Detected)"
+
+        # 2. Base Focus Detection
         yaw, pitch = head_direction(face)
 
         if abs(yaw) > 25:
-            focus = False
+            focus = False # Head turned horizontally
         if pitch > 40:
-            focus = False
+            focus = False # Head tilted excessively up
         if detect_sleep(face):
-            focus = False
+            focus = False # Eyes closed
+            
+        # 3. CONTEXTUAL FOCUS OVERRIDE (Writing vs. Phone Use)
+        # Check writing posture only if head is looking down (ambiguous state: pitch > 20) AND body is detected
+        if pitch > 20 and body:
+            is_writing = detect_writing_posture(body)
+            
+            if is_writing:
+                # OVERRIDE: Looking down + writing hand posture = FOCUSED
+                focus = True
+            elif detect_sleep(face):
+                # If sleeping, keep distraction
+                pass 
+            else:
+                # CONFIRM DISTRACTION: Looking down + NOT writing = DISTRACTED
+                focus = False
 
-    if writing:
-        focus = True
+        # 4. Final Data Compilation
+        center_x = face[1].x
+        center_y = face[1].y
+        
+        result["students"].append({
+            "yaw": float(yaw),
+            "pitch": float(pitch),
+            "posture": posture,
+            "writing_posture": is_writing, 
+            "sleeping": detect_sleep(face),
+            "focused": focus,
+            "center_x": float(center_x),
+            "center_y": float(center_y),
+        })
 
-    result["students"].append({
-        "yaw": float(yaw),
-        "pitch": float(pitch),
-        "writing": writing,
-        "sleeping": detect_sleep(face),
-        "focused": focus
-    })
+        if focus:
+            focused_count += 1
 
-    result["total"] = 1
-    result["focused"] = 1 if focus else 0
+    result["total"] = len(result["students"])
+    result["focused"] = focused_count
+
+    # --- GEMINI AI ANALYSIS ---
+    # Prepare data for the prompt
+    student_summaries = []
+    for i, student in enumerate(result["students"]):
+        status = "FOCUSED" if student["focused"] else "DISTRACTED"
+        reason = []
+        if not student["focused"]:
+            if student["sleeping"]: reason.append("Sleeping/Eyes Closed")
+            elif student["posture"].startswith("Sitting") and student["pitch"] > 20 and not student["writing_posture"]: reason.append("Looking down, not writing (possible phone use)")
+            elif abs(student["yaw"]) > 25 or student["pitch"] > 40: reason.append(f"Head turned away (Yaw: {student['yaw']:.1f}°)")
+            
+        summary = f"Student {i+1} ({student['posture']}) is {status}. Reason: {'; '.join(reason) or 'N/A'}"
+        student_summaries.append(summary)
+
+    prompt = f"""
+    Analyze the following student focus data for a classroom setting. 
+    Total Students Detected: {result['total']}
+    Total Focused: {result['focused']}
+    Focus Percentage: {round((result['focused'] / result['total']) * 100) if result['total'] > 0 else 0}%
+
+    Data per Student:
+    {'\n'.join(student_summaries)}
+
+    Provide a concise, professional summary for the teacher. Highlight the overall focus level and the primary reasons for distraction. If the focus is low (below 70%), suggest one brief, proactive intervention.
+    """
+
+    # Call the Gemini API
+    try:
+        gemini_response = gemini_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        result["gemini_analysis"] = gemini_response.text
+    except Exception as e:
+        result["gemini_analysis"] = f"Gemini Error: Check API Key/Network. Details: {e}"
 
     return result
 
