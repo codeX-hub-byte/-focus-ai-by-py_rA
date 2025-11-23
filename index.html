@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Adobe Exhibit: School Focus Detection</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+        body {
+            background-color: #f6f7fb;
+            color: #1e293b;
+            font-family: "Segoe UI", sans-serif;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border: 2px solid #d0d6e2;
+            border-radius: 6px;
+        }
+
+        input[type=range] {
+            accent-color: #2563eb;
+        }
+
+        .school-header {
+            background-color: #1e3a8a;
+            border-bottom: 3px solid #172554;
+        }
+
+        .hud-panel {
+            background: #ffffff;
+            border: 1px solid #d7dce3;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+        }
+
+        .school-footer {
+            background-color: #e2e8f0;
+            color: #475569;
+        }
+
+        #loader {
+            background: rgba(255,255,255,0.92);
+        }
+
+        #loader h2 { color: #1e3a8a; }
+        #loader p { color: #475569; }
+
+        .focused-text { color: #059669 !important; }
+        .warning-text { color: #ca8a04 !important; }
+        .danger-text  { color: #dc2626 !important; }
+    </style>
+</head>
+
+<body class="h-screen flex flex-col overflow-hidden">
+
+    <!-- Header -->
+    <div class="school-header p-4 flex flex-wrap justify-between items-center gap-4">
+        <div>
+            <h1 class="text-xl font-bold text-white tracking-widest">FOCUS<span class="text-yellow-300">AI</span></h1>
+            <p class="text-xs text-blue-200">School Activity Attention Tracking</p>
+        </div>
+
+        <div class="flex items-center gap-4 bg-white px-4 py-2 rounded-lg shadow hud-panel">
+            <label class="text-xs font-bold text-slate-700">STRICTNESS:</label>
+            <input id="sensitivity" type="range" min="10" max="90" value="50" class="w-32 h-1">
+            <span id="senseVal" class="text-xs font-mono text-blue-700">50%</span>
+        </div>
+
+        <div class="flex gap-6">
+            <div class="text-center">
+                <div class="text-[10px] text-blue-100 uppercase">Students</div>
+                <div id="countDisplay" class="text-2xl font-bold text-white leading-none">0</div>
+            </div>
+            <div class="text-center">
+                <div class="text-[10px] text-blue-100 uppercase">Focus Level</div>
+                <div id="focusDisplay" class="text-2xl font-bold text-white leading-none">--</div>
+            </div>
+        </div>
+
+        <button id="initBtn"
+            onclick="initSystem()"
+            class="bg-yellow-400 hover:bg-yellow-300 text-black px-6 py-2 rounded font-bold text-sm transition shadow">
+            START SYSTEM
+        </button>
+    </div>
+
+    <!-- Video + Canvas Area -->
+    <div class="relative flex-1 bg-white w-full flex items-center justify-center overflow-hidden">
+        <video id="video" class="hidden" playsinline></video>
+        <canvas id="canvas"></canvas>
+
+        <div id="loader" class="absolute inset-0 flex flex-col items-center justify-center z-30 hidden">
+            <div class="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+            <h2 class="text-xl font-bold">LOADING SYSTEM</h2>
+            <p class="text-sm mt-2">Initializing Camera & Backend…</p>
+        </div>
+    </div>
+
+    <!-- Footer Legend -->
+    <div class="school-footer p-2 text-[10px] flex justify-center gap-6 border-t border-slate-300">
+        <span class="flex items-center gap-1">
+            <div class="w-2 h-2 bg-green-500 rounded-full"></div> Focused
+        </span>
+        <span class="flex items-center gap-1">
+            <div class="w-2 h-2 bg-red-500 rounded-full"></div> Distracted
+        </span>
+    </div>
+
+    <script>
+        let isRunning = false;
+
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const loader = document.getElementById('loader');
+        const initBtn = document.getElementById('initBtn');
+
+        const countDisplay = document.getElementById('countDisplay');
+        const focusDisplay = document.getElementById('focusDisplay');
+        const senseSlider = document.getElementById('sensitivity');
+        const senseVal = document.getElementById('senseVal');
+
+        let STRICTNESS_THRESHOLD = 0.5;
+        senseSlider.oninput = (e) => {
+            STRICTNESS_THRESHOLD = e.target.value / 100;
+            senseVal.innerText = e.target.value + "%";
+        };
+
+        async function initSystem() {
+            if (isRunning) return;
+            initBtn.disabled = true;
+            loader.classList.remove("hidden");
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 }
+                });
+
+                video.srcObject = stream;
+                await new Promise(res => video.onloadedmetadata = res);
+                video.play();
+
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+
+                loader.classList.add("hidden");
+                initBtn.innerText = "SCANNING...";
+                initBtn.classList.replace("bg-yellow-400", "bg-green-500");
+                isRunning = true;
+
+                renderLoop();
+
+            } catch (err) {
+                alert(err.message);
+                loader.classList.add("hidden");
+                initBtn.disabled = false;
+            }
+        }
+
+        async function renderLoop() {
+            if (!isRunning) return;
+
+            // Draw video frame
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // Capture frame as blob
+            canvas.toBlob(async (blob) => {
+                let form = new FormData();
+                form.append("file", blob, "frame.jpg");
+
+                try {
+                    const res = await fetch("http://localhost:8000/process-frame", {
+                        method: "POST",
+                        body: form
+                    });
+
+                    const data = await res.json();
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                    let total = data.total || 0;
+                    let focusedCount = 0;
+
+                    data.students.forEach(student => {
+                        const x = canvas.width / 2;
+                        const y = canvas.height / 2;
+
+                        const color = student.focused ? "#059669" : "#dc2626";
+                        if (student.focused) focusedCount++;
+
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = 4;
+                        ctx.beginPath();
+                        ctx.arc(x, y, 50, 0, 2 * Math.PI);
+                        ctx.stroke();
+
+                        ctx.fillStyle = color;
+                        ctx.font = "bold 20px Arial";
+                        ctx.fillText(student.focused ? "FOCUSED" : "DISTRACTED", x - 60, y - 60);
+                    });
+
+                    countDisplay.innerText = total;
+                    const pct = total > 0 ? Math.round((focusedCount / total) * 100) : 0;
+                    focusDisplay.innerText = pct + "%";
+
+                    if (pct > 80) focusDisplay.className = "text-2xl font-bold focused-text";
+                    else if (pct > 50) focusDisplay.className = "text-2xl font-bold warning-text";
+                    else focusDisplay.className = "text-2xl font-bold danger-text";
+
+                } catch (err) {
+                    console.error(err);
+                }
+            }, "image/jpeg", 0.8);
+
+            requestAnimationFrame(renderLoop);
+        }
+    </script>
+
+</body>
+</html>
