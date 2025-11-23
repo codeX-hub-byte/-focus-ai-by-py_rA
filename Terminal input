@@ -1,0 +1,15 @@
+export GEMINI_API_KEY='YOUR_API_KEY_HERE'
+
+
+
+
+
+
+pip install -r requirements.txt
+
+
+
+
+
+python main.py
+
