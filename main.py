@@ -12,7 +12,7 @@ from google import genai
 
 REVERSE_EYE_LOGIC = False
 
-gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+gemini_client = genai.Client(api_key=os.environ.get("AlzaSyCw4F7tQbKHtl8rHHCEe2YzgM58dRblds"))
 
 app = FastAPI()
 
@@ -36,21 +36,17 @@ def get_yaw_pitch(face):
     left_eye = face[33]
     right_eye = face[263]
     nose = face[1]
-
     dx = right_eye.x - left_eye.x
     dy = right_eye.y - left_eye.y
-
     yaw = np.degrees(np.arctan2(dy, dx))
     pitch = (nose.y - (left_eye.y + right_eye.y) / 2) * 100
-
     return yaw, pitch
 
 
 def detect_sleep(face):
     top = face[159]
     bottom = face[145]
-    eye_gap = abs(top.y - bottom.y)
-    return eye_gap < 0.003
+    return abs(top.y - bottom.y) < 0.003
 
 
 def detect_writing(kp):
@@ -58,7 +54,9 @@ def detect_writing(kp):
         rw_y = kp[10][1]
         rs_y = kp[6][1]
         rh_y = kp[12][1]
-        return (rw_y > rs_y + 30) and (rw_y > rh_y - 30)
+        wrist_below_shoulder = rw_y > rs_y + 30
+        wrist_low = rw_y > rh_y - 30
+        return wrist_below_shoulder and wrist_low
     except:
         return False
 
@@ -68,12 +66,12 @@ def detect_posture(kp):
         hip_y = (kp[11][1] + kp[12][1]) / 2
         knee_y = (kp[13][1] + kp[14][1]) / 2
         ankle_y = (kp[15][1] + kp[16][1]) / 2
-
-        if knee_y - hip_y < 20:
+        hip_to_knee = knee_y - hip_y
+        if hip_to_knee < 20:
             return "Sitting"
         if ankle_y - hip_y > 100:
             return "Standing"
-        return "Unknown/Partial"
+        return "Unknown"
     except:
         return "Unknown"
 
@@ -90,12 +88,8 @@ def smooth_focus(student_id, current_focus):
 
 
 @app.post("/process-frame")
-async def process_frame(
-    file: UploadFile = File(...),
-    strictness: int = Query(50, ge=10, le=90)
-):
+async def process_frame(file: UploadFile = File(...), strictness: int = Query(50, ge=10, le=90)):
     content = await file.read()
-
     img = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
     h, w = img.shape[:2]
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -116,19 +110,18 @@ async def process_frame(
 
     for i, face in enumerate(face_res.multi_face_landmarks):
         face_landmarks = face.landmark
-
         yaw, pitch = get_yaw_pitch(face_landmarks)
         sleeping = detect_sleep(face_landmarks)
+
         face_nose_norm = np.array([face_landmarks[1].x, face_landmarks[1].y])
 
         matched_body_kp = None
-        min_d = float('inf')
+        min_d = float("inf")
 
         for kp in bodies:
             try:
-                yolo_head = np.array([kp.xy[0][0] / w, kp.xy[0][1] / h])
-                d = np.linalg.norm(face_nose_norm - yolo_head)
-
+                head_norm = np.array([kp.xy[0][0] / w, kp.xy[0][1] / h])
+                d = np.linalg.norm(face_nose_norm - head_norm)
                 if d < min_d and d < NORMALIZED_MATCH_THRESHOLD:
                     min_d = d
                     matched_body_kp = kp.xy[0]
@@ -137,7 +130,6 @@ async def process_frame(
 
         posture = "Unknown"
         writing = False
-
         if matched_body_kp is not None:
             posture = detect_posture(matched_body_kp)
             writing = detect_writing(matched_body_kp)
@@ -163,7 +155,8 @@ async def process_frame(
             else:
                 focus = False
 
-        focus = smooth_focus(i, focus)
+        student_id = i
+        focus = smooth_focus(student_id, focus)
 
         result["students"].append({
             "yaw": float(yaw),
@@ -182,10 +175,17 @@ async def process_frame(
     prompt = "Classroom analysis:\n"
     for i, s in enumerate(result["students"]):
         prompt += (
-            f"Student {i+1}: focused={s['focused']}, "
-            f"posture={s['posture']}, "
-            f"sleeping={s['sleeping']}, "
-            f"writing={s['writing']}\n"
+            "Student "
+            + str(i + 1)
+            + ": focused="
+            + str(s["focused"])
+            + ", posture="
+            + s["posture"]
+            + ", sleeping="
+            + str(s["sleeping"])
+            + ", writing="
+            + str(s["writing"])
+            + "\n"
         )
 
     try:
@@ -195,7 +195,7 @@ async def process_frame(
         )
         result["gemini_analysis"] = g.text
     except Exception as e:
-        result["gemini_analysis"] = f"Gemini error: {e}"
+        result["gemini_analysis"] = "Gemini error: " + str(e)
 
     return result
 
