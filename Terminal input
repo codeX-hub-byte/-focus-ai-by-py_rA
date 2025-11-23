@@ -1,7 +1,7 @@
-export GEMINI_API_KEY='YOUR_API_KEY_HERE'
+$env:GEMINI_API_KEY="AlzaSyCw4F7tQbKHtl8rHHCEe2YzgM58dRblds"
+                  or
 
-
-
+set GEMINI_API_KEY=AlzaSyCw4F7tQbKHtl8rHHCEe2YzgM58dRblds
 
 
 
