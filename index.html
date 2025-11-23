@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Adobe Exhibit: School Focus Detection</title>
+    <title>AI-Enhanced Student Focus Detection</title>
 
     <script src="https://cdn.tailwindcss.com"></script>
 
@@ -52,16 +52,22 @@
         .focused-text { color: #059669 !important; }
         .warning-text { color: #ca8a04 !important; }
         .danger-text  { color: #dc2626 !important; }
+        
+        #geminiAnalysis {
+            white-space: pre-wrap; /* Preserves line breaks from Gemini output */
+            font-size: 0.85rem;
+            line-height: 1.4;
+            color: #1e3a8a;
+        }
     </style>
 </head>
 
 <body class="h-screen flex flex-col overflow-hidden">
 
-    <!-- Header -->
     <div class="school-header p-4 flex flex-wrap justify-between items-center gap-4">
         <div>
             <h1 class="text-xl font-bold text-white tracking-widest">FOCUS<span class="text-yellow-300">AI</span></h1>
-            <p class="text-xs text-blue-200">School Activity Attention Tracking</p>
+            <p class="text-xs text-blue-200">Gemini-Enhanced Classroom Tracking</p>
         </div>
 
         <div class="flex items-center gap-4 bg-white px-4 py-2 rounded-lg shadow hud-panel">
@@ -88,19 +94,25 @@
         </button>
     </div>
 
-    <!-- Video + Canvas Area -->
-    <div class="relative flex-1 bg-white w-full flex items-center justify-center overflow-hidden">
-        <video id="video" class="hidden" playsinline></video>
-        <canvas id="canvas"></canvas>
+    <div class="relative flex-1 bg-white w-full flex overflow-hidden">
+        
+        <div class="flex-1 flex items-center justify-center relative p-4">
+            <video id="video" class="hidden" playsinline></video>
+            <canvas id="canvas" class="w-full h-full"></canvas>
 
-        <div id="loader" class="absolute inset-0 flex flex-col items-center justify-center z-30 hidden">
-            <div class="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
-            <h2 class="text-xl font-bold">LOADING SYSTEM</h2>
-            <p class="text-sm mt-2">Initializing Camera & Backend…</p>
+            <div id="loader" class="absolute inset-0 flex flex-col items-center justify-center z-30 hidden">
+                <div class="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+                <h2 class="text-xl font-bold">LOADING SYSTEM</h2>
+                <p class="text-sm mt-2">Initializing Camera & Backend…</p>
+            </div>
+        </div>
+
+        <div class="w-80 bg-blue-50/50 p-4 border-l border-blue-200 overflow-y-auto">
+            <h3 class="text-lg font-bold text-blue-800 mb-3 border-b pb-1">AI Focus Analysis (Gemini)</h3>
+            <div id="geminiAnalysis" class="text-gray-700">Awaiting first frame analysis...</div>
         </div>
     </div>
 
-    <!-- Footer Legend -->
     <div class="school-footer p-2 text-[10px] flex justify-center gap-6 border-t border-slate-300">
         <span class="flex items-center gap-1">
             <div class="w-2 h-2 bg-green-500 rounded-full"></div> Focused
@@ -118,6 +130,7 @@
         const ctx = canvas.getContext('2d');
         const loader = document.getElementById('loader');
         const initBtn = document.getElementById('initBtn');
+        const geminiAnalysis = document.getElementById('geminiAnalysis');
 
         const countDisplay = document.getElementById('countDisplay');
         const focusDisplay = document.getElementById('focusDisplay');
@@ -136,6 +149,7 @@
             loader.classList.remove("hidden");
 
             try {
+                // Using a standard resolution for webcams
                 const stream = await navigator.mediaDevices.getUserMedia({
                     video: { width: 640, height: 480 }
                 });
@@ -155,7 +169,7 @@
                 renderLoop();
 
             } catch (err) {
-                alert(err.message);
+                alert("Error initializing camera: " + err.message);
                 loader.classList.add("hidden");
                 initBtn.disabled = false;
             }
@@ -179,30 +193,38 @@
                     });
 
                     const data = await res.json();
+                    
+                    // Redraw frame to clear previous overlays
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
                     let total = data.total || 0;
                     let focusedCount = 0;
 
+                    // Iterate over ALL students and draw their focus indicators
                     data.students.forEach(student => {
-                        const x = canvas.width / 2;
-                        const y = canvas.height / 2;
+                        // Use the normalized coordinates (0 to 1) from the backend
+                        // and scale them up to the canvas size.
+                        const x = student.center_x * canvas.width;
+                        const y = student.center_y * canvas.height;
 
                         const color = student.focused ? "#059669" : "#dc2626";
                         if (student.focused) focusedCount++;
 
+                        // Draw Focus Circle
                         ctx.strokeStyle = color;
                         ctx.lineWidth = 4;
                         ctx.beginPath();
-                        ctx.arc(x, y, 50, 0, 2 * Math.PI);
+                        ctx.arc(x, y, 40, 0, 2 * Math.PI); // Draw circle at student's location
                         ctx.stroke();
 
+                        // Draw Focus Text
                         ctx.fillStyle = color;
-                        ctx.font = "bold 20px Arial";
-                        ctx.fillText(student.focused ? "FOCUSED" : "DISTRACTED", x - 60, y - 60);
+                        ctx.font = "bold 14px Arial"; 
+                        ctx.fillText(student.focused ? "FOCUSED" : "DISTRACTED", x - 40, y - 50);
                     });
 
+                    // Update HUD display
                     countDisplay.innerText = total;
                     const pct = total > 0 ? Math.round((focusedCount / total) * 100) : 0;
                     focusDisplay.innerText = pct + "%";
@@ -211,8 +233,14 @@
                     else if (pct > 50) focusDisplay.className = "text-2xl font-bold warning-text";
                     else focusDisplay.className = "text-2xl font-bold danger-text";
 
+                    // Update Gemini Analysis
+                    if (data.gemini_analysis) {
+                        geminiAnalysis.innerText = data.gemini_analysis;
+                    }
+
                 } catch (err) {
-                    console.error(err);
+                    console.error("Error processing frame:", err);
+                    geminiAnalysis.innerText = "Connection Error: Cannot reach the backend server (main.py). Please check the terminal."
                 }
             }, "image/jpeg", 0.8);
 
