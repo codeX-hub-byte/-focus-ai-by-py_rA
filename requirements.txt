@@ -1,7 +1,8 @@
 fastapi
-uvicorn[standard]
-numpy
-opencv-python-headless
-mediapipe
-google-genai
+uvicorn
 python-multipart
+numpy
+opencv-python
+mediapipe
+ultralytics
+google-genai
