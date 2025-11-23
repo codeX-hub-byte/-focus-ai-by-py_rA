@@ -137,9 +137,9 @@
         const senseSlider = document.getElementById('sensitivity');
         const senseVal = document.getElementById('senseVal');
 
-        let STRICTNESS_THRESHOLD = 0.5;
+        // Note: The threshold logic is now handled entirely in the backend. 
+        // We only need to send the slider value (10-90)
         senseSlider.oninput = (e) => {
-            STRICTNESS_THRESHOLD = e.target.value / 100;
             senseVal.innerText = e.target.value + "%";
         };
 
@@ -186,8 +186,14 @@
                 let form = new FormData();
                 form.append("file", blob, "frame.jpg");
 
+                // --- NEW: Get strictness value from slider ---
+                const strictness = senseSlider.value; 
+
                 try {
-                    const res = await fetch("http://localhost:8000/process-frame", {
+                    // --- MODIFIED: Append strictness as query parameter ---
+                    const url = `http://localhost:8000/process-frame?strictness=${strictness}`;
+
+                    const res = await fetch(url, {
                         method: "POST",
                         body: form
                     });
@@ -244,6 +250,7 @@
                 }
             }, "image/jpeg", 0.8);
 
+            // Request the next frame iteration
             requestAnimationFrame(renderLoop);
         }
     </script>
