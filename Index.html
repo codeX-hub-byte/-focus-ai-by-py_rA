@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FOCUS AI: School Activity Attention Tracking (High Accuracy)</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+    <style>
+        /* ===== School Theme Styles ===== */
+
+        body {
+            background-color: #f6f7fb;
+            color: #1e293b;
+            font-family: "Segoe UI", sans-serif;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border: 2px solid #d0d6e2;
+            border-radius: 6px;
+        }
+
+        input[type=range] {
+            accent-color: #2563eb;
+        }
+
+        /* Header - school blue */
+        .school-header {
+            background-color: #1e3a8a;
+            border-bottom: 3px solid #172554;
+        }
+
+        /* Main panels */
+        .hud-panel {
+            background: #ffffff;
+            border: 1px solid #d7dce3;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+        }
+
+        /* Footer - school worksheet style */
+        .school-footer {
+            background-color: #e2e8f0;
+            color: #475569;
+        }
+
+        /* Loader */
+        #loader {
+            background: rgba(255,255,255,0.92);
+        }
+
+        #loader h2 { color: #1e3a8a; }
+        #loader p { color: #475569; }
+
+        /* Label Colors */
+        .focused-text { color: #059669 !important; }
+        .warning-text { color: #ca8a04 !important; }
+        .danger-text  { color: #dc2626 !important; }
+    </style>
+</head>
+
+<body class="h-screen flex flex-col overflow-hidden">
+
+    <div class="school-header p-4 flex flex-wrap justify-between items-center gap-4">
+        <div>
+            <h1 class="text-xl font-bold text-white tracking-widest">FOCUS<span class="text-yellow-300">AI</span></h1>
+            <p class="text-xs text-blue-200">School Activity Attention Tracking (High Accuracy)</p>
+        </div>
+
+        <div class="flex items-center gap-4 bg-white px-4 py-2 rounded-lg shadow hud-panel">
+            <label class="text-xs font-bold text-slate-700">STRICTNESS:</label>
+            <input id="sensitivity" type="range" min="10" max="90" value="50" class="w-32 h-1">
+            <span id="senseVal" class="text-xs font-mono text-blue-700">50%</span>
+        </div>
+
+        <div class="flex gap-6">
+            <div class="text-center">
+                <div class="text-[10px] text-blue-100 uppercase">Students</div>
+                <div id="countDisplay" class="text-2xl font-bold text-white leading-none">0</div>
+            </div>
+            <div class="text-center">
+                <div class="text-[10px] text-blue-100 uppercase">Focus Level</div>
+                <div id="focusDisplay" class="text-2xl font-bold text-white leading-none">--</div>
+            </div>
+        </div>
+
+        <button id="initBtn"
+            onclick="initSystem()"
+            class="bg-yellow-400 hover:bg-yellow-300 text-black px-6 py-2 rounded font-bold text-sm transition shadow">
+            START SYSTEM
+        </button>
+    </div>
+
+    <div class="relative flex-1 bg-white w-full flex items-center justify-center overflow-hidden">
+        <video id="video" class="hidden" playsinline></video>
+        <canvas id="canvas"></canvas>
+
+        <div id="loader" class="absolute inset-0 flex flex-col items-center justify-center z-30 hidden">
+            <div class="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+            <h2 class="text-xl font-bold">LOADING AI MODEL</h2>
+            <p class="text-sm mt-2">MoveNet Multi-Person Loading…</p>
+        </div>
+    </div>
+
+    <div class="school-footer p-2 text-[10px] flex justify-center gap-6 border-t border-slate-300">
+        <span class="flex items-center gap-1">
+            <div class="w-2 h-2 bg-green-500 rounded-full"></div> Focused (Score &lt; 2.0)
+        </span>
+        <span class="flex items-center gap-1">
+            <div class="w-2 h-2 bg-red-500 rounded-full"></div> Distracted (Score &gt;= 2.0)
+        </span>
+    </div>
+
+    <script>
+        let detector;
+        let isRunning = false;
+        
+        // --- Global Tracking & Smoothing Parameters ---
+        const SMOOTHING_ALPHA = 0.8; // Controls responsiveness (0.8 is responsive and smooth)
+        const POSE_BUFFER_SIZE = 10;
+        let trackedPeople = []; // Array to hold PersonTracker objects
+
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const loader = document.getElementById('loader');
+        const initBtn = document.getElementById('initBtn');
+
+        const countDisplay = document.getElementById('countDisplay');
+        const focusDisplay = document.getElementById('focusDisplay');
+        const senseSlider = document.getElementById('sensitivity');
+        const senseVal = document.getElementById('senseVal');
+
+        let STRICTNESS_THRESHOLD = 0.5;
+        senseSlider.oninput = (e) => {
+            STRICTNESS_THRESHOLD = e.target.value / 100;
+            senseVal.innerText = e.target.value + "%";
+        };
+
+        // Utility function to calculate distance between two points
+        function dist(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        // --- Person Tracker Class for Temporal Smoothing ---
+        class PersonTracker {
+            constructor(id, initialPose) {
+                this.id = id;
+                this.poseHistory = [initialPose];
+                this.smoothedPose = initialPose;
+                this.lastSeen = Date.now();
+            }
+
+            update(newPose) {
+                this.lastSeen = Date.now();
+                this.poseHistory.push(newPose);
+                if (this.poseHistory.length > POSE_BUFFER_SIZE) {
+                    this.poseHistory.shift();
+                }
+
+                // Apply exponential smoothing to keypoints
+                const newSmoothedPose = JSON.parse(JSON.stringify(newPose));
+
+                for (let i = 0; i < newSmoothedPose.keypoints.length; i++) {
+                    const currentKP = newPose.keypoints[i];
+                    const prevKP = this.smoothedPose.keypoints[i];
+                    
+                    if (prevKP) {
+                        // Apply smoothing if confidence is high (currentKP.score > 0.1)
+                        if (currentKP.score > 0.1) {
+                            currentKP.x = SMOOTHING_ALPHA * currentKP.x + (1 - SMOOTHING_ALPHA) * prevKP.x;
+                            currentKP.y = SMOOTHING_ALPHA * currentKP.y + (1 - SMOOTHING_ALPHA) * prevKP.y;
+                            currentKP.score = SMOOTHING_ALPHA * currentKP.score + (1 - SMOOTHING_ALPHA) * prevKP.score;
+                        } 
+                        // Occlusion Handling: Use buffered position if current score is too low
+                        else {
+                             currentKP.x = prevKP.x;
+                             currentKP.y = prevKP.y;
+                             // Decay score for non-visible points
+                             currentKP.score = prevKP.score * 0.5; 
+                        }
+                    }
+                }
+                this.smoothedPose = newSmoothedPose;
+            }
+        }
+
+        // --- Pose Matching Function (Simple Bounding Box Proximity) ---
+        function findNearestTracker(pose, threshold = 200) {
+            let minDistance = Infinity;
+            let bestMatch = null;
+            // Use shoulder center for robust tracking anchor
+            // Indices 5 and 6 correspond to left_shoulder and right_shoulder
+            const currentCenter = [(pose.keypoints[5].x + pose.keypoints[6].x) / 2, (pose.keypoints[5].y + pose.keypoints[6].y) / 2]; 
+
+            trackedPeople.forEach(tracker => {
+                const smoothedCenter = [(tracker.smoothedPose.keypoints[5].x + tracker.smoothedPose.keypoints[6].x) / 2, (tracker.smoothedPose.keypoints[5].y + tracker.smoothedPose.keypoints[6].y) / 2];
+                const distance = dist({ x: currentCenter[0], y: currentCenter[1] }, { x: smoothedCenter[0], y: smoothedCenter[1] });
+                
+                if (distance < minDistance && distance < threshold) { 
+                    minDistance = distance;
+                    bestMatch = tracker;
+                }
+            });
+            return bestMatch;
+        }
+
+
+        // --- Initialization and Render Loop ---
+        async function initSystem() {
+            if (isRunning) return;
+            initBtn.disabled = true;
+            loader.classList.remove("hidden");
+
+            try {
+                // Request high resolution for better keypoint accuracy
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 1280, height: 720, facingMode: 'user' }
+                });
+
+                video.srcObject = stream;
+                await new Promise(res => video.onloadedmetadata = res);
+                video.play();
+
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+
+                detector = await poseDetection.createDetector(
+                    poseDetection.SupportedModels.MoveNet,
+                    {
+                        modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING,
+                        enableSmoothing: true,
+                        minPoseScore: 0.25
+                    }
+                );
+
+                loader.classList.add("hidden");
+                initBtn.innerText = "SCANNING...";
+                initBtn.classList.replace("bg-yellow-400", "bg-green-500");
+                isRunning = true;
+
+                renderLoop();
+
+            } catch (err) {
+                alert("Error initializing camera or model: " + err.message);
+                loader.classList.add("hidden");
+                initBtn.disabled = false;
+            }
+        }
+
+        async function renderLoop() {
+            if (!isRunning) return;
+
+            const newPoses = await detector.estimatePoses(video, {
+                maxPoses: 20,
+                flipHorizontal: false
+            });
+            
+            // --- 1. Update Tracked People with Smoothing ---
+            const newTrackedPeople = [];
+            let unmatchedNewPoses = [...newPoses];
+            
+            const STALE_THRESHOLD = 500; // Remove trackers not seen for 0.5 seconds
+
+            // Step 1.1: Match new poses to existing trackers
+            trackedPeople.forEach(tracker => {
+                const now = Date.now();
+                if ((now - tracker.lastSeen) > STALE_THRESHOLD) return; // Skip stale trackers
+
+                // Find the closest new pose to the tracker's last smoothed position
+                const nearestNewPose = findNearestTracker(tracker.smoothedPose); 
+                
+                if (nearestNewPose) {
+                    // Find the original pose object from the newPoses list
+                    const originalPoseToUpdateWith = newPoses.find(p => 
+                        // Simple way to check if it's the same pose detected, using distance of shoulder centers
+                        dist({x: p.keypoints[5].x, y: p.keypoints[5].y}, {x: nearestNewPose.keypoints[5].x, y: nearestNewPose.keypoints[5].y}) < 5 
+                    );
+
+                    if (originalPoseToUpdateWith) {
+                         tracker.update(originalPoseToUpdateWith); // Update with the original, unsmoothed pose
+                         newTrackedPeople.push(tracker);
+
+                         // Remove the used pose from the list of new poses
+                         const indexToRemove = unmatchedNewPoses.indexOf(originalPoseToUpdateWith);
+                         if (indexToRemove > -1) {
+                            unmatchedNewPoses.splice(indexToRemove, 1);
+                         }
+                    } else {
+                        // This case handles a matched tracker but a missing new pose (shouldn't happen often)
+                        tracker.update(tracker.smoothedPose); 
+                        newTrackedPeople.push(tracker);
+                    }
+                } else {
+                    // If no match, update tracker with its own last smoothed pose (predictive/hold)
+                    tracker.update(tracker.smoothedPose); 
+                    newTrackedPeople.push(tracker);
+                }
+            });
+            
+            // Step 1.2: Add new people (the unmatched poses)
+            unmatchedNewPoses.forEach((pose) => {
+                 const newId = Date.now() + Math.random(); 
+                 const newTracker = new PersonTracker(newId, pose);
+                 newTrackedPeople.push(newTracker);
+            });
+            
+            trackedPeople = newTrackedPeople;
+            
+            // --- 2. Draw Results using Smoothed Poses ---
+            drawResults(trackedPeople.map(t => t.smoothedPose)); 
+
+            requestAnimationFrame(renderLoop);
+        }
+
+        // --- Enhanced Draw Results with Dynamic Confidence ---
+        function drawResults(smoothedPoses) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "rgba(255,255,255,0.3)";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            let focusedCount = 0;
+            let total = 0;
+
+            smoothedPoses.forEach(pose => {
+                if (pose.score < 0.25) return;
+                total++;
+
+                // Helper to safely get keypoint
+                const getKeypoint = (name) => pose.keypoints.find(k => k.name === name);
+                
+                const nose = getKeypoint("nose");
+                const le = getKeypoint("left_ear");
+                const re = getKeypoint("right_ear");
+                const ls = getKeypoint("left_shoulder");
+                const rs = getKeypoint("right_shoulder");
+                const lh = getKeypoint("left_hip");
+                const rh = getKeypoint("right_hip");
+
+                // Check for core keypoint presence (already smoothed)
+                if (!nose || !ls || !rs || !le || !re) return;
+                
+                let distractionScore = 0; // Floating point score (max score is 4.0)
+
+                const shoulderCenter = (ls.x + rs.x) / 2;
+                const shoulderWidth = dist(ls, rs);
+                const coreConfidence = (ls.score + rs.score + nose.score) / 3;
+
+                // --- 1. Head Rotation (Yaw) Check (Weighted by Ear/Nose Confidence) ---
+                const yawConfidence = (le.score + re.score + nose.score) / 3;
+                if (yawConfidence > 0.3) {
+                    const dL = Math.abs(nose.x - le.x);
+                    const dR = Math.abs(nose.x - re.x);
+                    const yawRatio = Math.abs(dL - dR) / (shoulderWidth * 0.4); 
+                    
+                    if (yawRatio > 0.4) { 
+                        // Dynamic Confidence Weighting: Yaw contributes up to 1.0 based on confidence
+                        distractionScore += yawConfidence * 1.0; 
+                    }
+                }
+                
+
+                // --- 2. Head-to-Center Offset Check (Weighted by Core Confidence) ---
+                const offset = Math.abs(nose.x - shoulderCenter);
+                const allowedOffset = shoulderWidth * (1 - STRICTNESS_THRESHOLD); 
+                if (offset > allowedOffset) {
+                    distractionScore += coreConfidence * 1.0;
+                }
+
+                // --- 3. Slouching (Vertical Posture Drop) Check (Weighted by Core Confidence) ---
+                const shoulderCenterY = (ls.y + rs.y) / 2;
+                // If nose.y is much LARGER than shoulderCenterY, the student is looking down/slouching.
+                if (nose.y > (shoulderCenterY + shoulderWidth * 0.2)) {
+                    distractionScore += coreConfidence * 1.0;
+                }
+                
+                // --- 4. Body Twist Check (Weighted by Hip Confidence) ---
+                if (lh && rh && lh.score > 0.3 && rh.score > 0.3) {
+                    const hipConfidence = (lh.score + rh.score) / 2;
+                    const hipCenter = (lh.x + rh.x) / 2;
+                    const bodyCenterOffset = Math.abs(shoulderCenter - hipCenter);
+                    
+                    if (bodyCenterOffset > shoulderWidth * 0.3) { 
+                        distractionScore += hipConfidence * 1.0; 
+                    }
+                }
+                
+                // Final Composite Focus Determination: Score >= 2.0 indicates strong distraction
+                const focused = distractionScore < 2.0; 
+
+                if (focused) focusedCount++;
+
+                const color = focused ? "#059669" : "#dc2626"; // Green or Red
+
+                // --- Drawing Results on Canvas ---
+                const label = focused ? "FOCUSED" : `DISTRACTED (${distractionScore.toFixed(1)})`;
+                
+                // Draw all key points (smoothed)
+                pose.keypoints.forEach(kp => {
+                    ctx.fillStyle = kp.score > 0.5 ? color : 'gray';
+                    ctx.beginPath();
+                    ctx.arc(kp.x, kp.y, 3, 0, 2 * Math.PI);
+                    ctx.fill();
+                });
+
+                // 1. Draw Nose Circle (Head Status)
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.arc(nose.x, nose.y, 40, 0, 2 * Math.PI);
+                ctx.stroke();
+
+                // 2. Draw Shoulder Line
+                ctx.lineWidth = 6;
+                ctx.beginPath();
+                ctx.moveTo(ls.x, ls.y);
+                ctx.lineTo(rs.x, rs.y);
+                ctx.stroke();
+                
+                // 3. Draw Text Label
+                ctx.fillStyle = color;
+                ctx.font = "bold 16px Arial";
+                ctx.fillText(label, nose.x - 40, nose.y - 50);
+            });
+
+            // --- Update HUD ---
+            countDisplay.innerText = total;
+
+            const pct = total > 0 ? Math.round((focusedCount / total) * 100) : 0;
+            focusDisplay.innerText = pct + "%";
+
+            if (pct > 80) focusDisplay.className = "text-2xl font-bold focused-text";
+            else if (pct > 50) focusDisplay.className = "text-2xl font-bold warning-text";
+            else focusDisplay.className = "text-2xl font-bold danger-text";
+        }
+    </script>
+
+</body>
+</html>
