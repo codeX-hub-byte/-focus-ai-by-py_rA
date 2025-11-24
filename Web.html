@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FOCUS AI PRO: Classroom Analytics</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js for Analytics -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- TensorFlow -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; font-family: 'Inter', sans-serif; overflow: hidden; }
+        
+        /* HUD Glassmorphism */
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+        }
+
+        /* Canvas Overlay */
+        canvas { width: 100%; height: 100%; object-fit: cover; }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+
+        .status-dot { height: 8px; width: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+        .dot-green { background-color: #10b981; box-shadow: 0 0 8px #10b981; }
+        .dot-red { background-color: #ef4444; box-shadow: 0 0 8px #ef4444; }
+        .dot-yellow { background-color: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+    </style>
+</head>
+
+<body class="h-screen flex flex-col">
+
+    <!-- Top Bar -->
+    <div class="h-16 glass-panel m-2 flex items-center justify-between px-6 z-20">
+        <div class="flex items-center gap-3">
+            <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center font-bold text-white">F</div>
+            <div>
+                <h1 class="font-bold text-lg tracking-wide text-white">FOCUS <span class="text-blue-400">PRO</span></h1>
+                <div class="text-[10px] text-slate-400">V2.0 VECTOR ANALYSIS</div>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-8">
+            <div class="flex flex-col items-center">
+                <span class="text-[10px] text-slate-400 uppercase tracking-wider">Active Students</span>
+                <span id="studentCount" class="text-xl font-mono font-bold text-white">0</span>
+            </div>
+            <div class="w-px h-8 bg-slate-700"></div>
+            <div class="flex flex-col items-center">
+                <span class="text-[10px] text-slate-400 uppercase tracking-wider">Class Focus</span>
+                <span id="globalScore" class="text-xl font-mono font-bold text-emerald-400">--%</span>
+            </div>
+            <div class="w-px h-8 bg-slate-700"></div>
+            <div class="flex items-center gap-3">
+                <label class="text-xs text-slate-300">Strictness</label>
+                <input type="range" id="strictness" min="0" max="100" value="50" class="accent-blue-500 h-1 w-24">
+            </div>
+        </div>
+
+        <button id="startBtn" onclick="startSystem()" class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-lg font-medium text-sm transition shadow-lg shadow-blue-900/20">
+            INITIALIZE SYSTEM
+        </button>
+    </div>
+
+    <!-- Main Content Area -->
+    <div class="flex-1 flex gap-2 px-2 pb-2 overflow-hidden">
+        
+        <!-- Left: Camera Feed & AR Overlay -->
+        <div class="flex-1 glass-panel relative overflow-hidden flex items-center justify-center">
+            <!-- Loading Overlay -->
+            <div id="loader" class="absolute inset-0 z-50 bg-slate-900 flex flex-col items-center justify-center hidden">
+                <div class="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+                <h2 class="text-white font-bold">LOADING NEURAL NETWORK</h2>
+                <p class="text-slate-400 text-xs mt-2">Initializing MoveNet Lightning (FP16)...</p>
+            </div>
+
+            <video id="video" class="hidden" playsinline></video>
+            <canvas id="output"></canvas>
+
+            <!-- Overlay Stats -->
+            <div class="absolute top-4 left-4 bg-black/50 p-2 rounded text-[10px] font-mono text-green-400 border border-green-900/30 pointer-events-none">
+                FPS: <span id="fpsDisplay">0</span><br>
+                Latency: <span id="latencyDisplay">0</span>ms
+            </div>
+        </div>
+
+        <!-- Right: Analytics Sidebar -->
+        <div class="w-80 flex flex-col gap-2">
+            <!-- Real-time Graph -->
+            <div class="h-1/3 glass-panel p-3 flex flex-col">
+                <h3 class="text-xs font-bold text-slate-300 mb-2 uppercase">Attention Timeline</h3>
+                <div class="flex-1 relative">
+                    <canvas id="chartCanvas"></canvas>
+                </div>
+            </div>
+
+            <!-- Student List -->
+            <div class="flex-1 glass-panel p-3 flex flex-col overflow-hidden">
+                <h3 class="text-xs font-bold text-slate-300 mb-2 uppercase flex justify-between">
+                    <span>Live Breakdown</span>
+                    <span class="text-blue-400 text-[10px]">ID PERSISTENCE ON</span>
+                </h3>
+                <div id="studentList" class="flex-1 overflow-y-auto space-y-2 pr-1">
+                    <!-- Student Cards Injected Here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const CONFIG = {
+            smoothing: 0.6,     // Lower = smoother but more lag
+            maxPoses: 15,
+            minConfidence: 0.25,
+            handRaiseThreshold: -0.5 // Wrist Y vs Nose Y
+        };
+
+        // State
+        let detector;
+        let isRunning = false;
+        let rafId;
+        let lastFrameTime = 0;
+        let students = new Map(); // Stores StudentTracker objects by ID
+        let nextId = 1;
+        let chartInstance;
+
+        // Elements
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('output');
+        const ctx = canvas.getContext('2d');
+        const studentList = document.getElementById('studentList');
+        const fpsDisplay = document.getElementById('fpsDisplay');
+        
+        // --- CHART SETUP ---
+        const chartCtx = document.getElementById('chartCanvas').getContext('2d');
+        const chartData = {
+            labels: Array(20).fill(''),
+            datasets: [{
+                label: 'Class Focus %',
+                data: Array(20).fill(100),
+                borderColor: '#10b981',
+                backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                borderWidth: 2,
+                fill: true,
+                tension: 0.4,
+                pointRadius: 0
+            }]
+        };
+        chartInstance = new Chart(chartCtx, {
+            type: 'line',
+            data: chartData,
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: { min: 0, max: 100, grid: { color: '#334155' }, ticks: { color: '#94a3b8', font: {size: 9} } },
+                    x: { display: false }
+                },
+                plugins: { legend: { display: false } },
+                animation: false
+            }
+        });
+
+        // --- VECTOR MATH HELPERS ---
+        const Vector = {
+            dist: (a, b) => Math.sqrt((a.x - b.x)**2 + (a.y - b.y)**2),
+            angle: (a, b) => Math.atan2(b.y - a.y, b.x - a.x),
+            midpoint: (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
+        };
+
+        // --- STUDENT TRACKER CLASS ---
+        class StudentTracker {
+            constructor(id, pose) {
+                this.id = id;
+                this.color = `hsl(${Math.random() * 360}, 70%, 60%)`;
+                this.pose = pose;
+                this.missingFrames = 0;
+                this.state = {
+                    focusScore: 100,
+                    isDistracted: false,
+                    isRaisingHand: false,
+                    reason: 'Active'
+                };
+                this.history = []; // For smoothing
+            }
+
+            update(newPose) {
+                this.missingFrames = 0;
+                
+                // Smooth keypoints
+                if(this.pose) {
+                    newPose.keypoints.forEach((kp, i) => {
+                        const oldKp = this.pose.keypoints[i];
+                        kp.x = oldKp.x * CONFIG.smoothing + kp.x * (1 - CONFIG.smoothing);
+                        kp.y = oldKp.y * CONFIG.smoothing + kp.y * (1 - CONFIG.smoothing);
+                    });
+                }
+                this.pose = newPose;
+                this.analyzeBehavior();
+            }
+
+            analyzeBehavior() {
+                const kp = (name) => this.pose.keypoints.find(k => k.name === name);
+                const nose = kp('nose');
+                const lEar = kp('left_ear');
+                const rEar = kp('right_ear');
+                const lEye = kp('left_eye');
+                const rEye = kp('right_eye');
+                const lWrist = kp('left_wrist');
+                const rWrist = kp('right_wrist');
+                const lShoulder = kp('left_shoulder');
+                const rShoulder = kp('right_shoulder');
+
+                if (!nose || !lEar || !rEar || !lShoulder || !rShoulder) return;
+
+                const shoulderWidth = Vector.dist(lShoulder, rShoulder);
+                const strictness = document.getElementById('strictness').value / 100;
+
+                let penalty = 0;
+                let reason = "Focused";
+                let isHandUp = false;
+
+                // 1. Hand Raising Detection (Wrist higher than Eye)
+                if ((lWrist && lWrist.score > 0.3 && lWrist.y < nose.y) || 
+                    (rWrist && rWrist.score > 0.3 && rWrist.y < nose.y)) {
+                    isHandUp = true;
+                    reason = "Hand Raised";
+                    penalty = 0; // Hand raising is good behavior
+                } else {
+                    // 2. YAW Analysis (Head Turning)
+                    // Calculate ratio of nose position between ears
+                    const earDist = Vector.dist(lEar, rEar);
+                    const lDist = Vector.dist(lEar, nose);
+                    const rDist = Vector.dist(rEar, nose);
+                    
+                    // If nose is too close to one ear, they are turning
+                    const turnRatio = Math.abs(lDist - rDist) / earDist;
+                    if (turnRatio > (0.6 * (1.5 - strictness))) {
+                        penalty += 60;
+                        reason = "Looking Away";
+                    }
+
+                    // 3. PITCH Analysis (Slouching/Looking Down)
+                    // Compare Nose Y to Ear Y. Looking down raises ears relative to nose in 2D.
+                    const earYAvg = (lEar.y + rEar.y) / 2;
+                    const pitchDiff = nose.y - earYAvg;
+                    
+                    // If nose is significantly below ears (positive Y), they are looking down
+                    if (pitchDiff > (shoulderWidth * 0.3 * (1.5 - strictness))) {
+                        penalty += 50;
+                        reason = "Head Down";
+                    }
+
+                    // 4. Body Alignment (Shoulders vs Hips could be added here)
+                }
+
+                // Update State
+                this.state.focusScore = Math.max(0, 100 - penalty);
+                this.state.isDistracted = this.state.focusScore < 50;
+                this.state.isRaisingHand = isHandUp;
+                this.state.reason = isHandUp ? "Hand Raised" : (this.state.isDistracted ? reason : "Focused");
+            }
+        }
+
+        // --- SYSTEM CORE ---
+
+        async function startSystem() {
+            const btn = document.getElementById('startBtn');
+            const loader = document.getElementById('loader');
+            
+            if (isRunning) return;
+            
+            btn.disabled = true;
+            loader.classList.remove('hidden');
+
+            try {
+                // 1. Setup Camera
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 1280, height: 720, facingMode: 'user' }
+                });
+                video.srcObject = stream;
+                await new Promise(r => video.onloadedmetadata = r);
+                video.play();
+
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+
+                // 2. Load Model
+                detector = await poseDetection.createDetector(
+                    poseDetection.SupportedModels.MoveNet,
+                    { modelType: poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING }
+                );
+
+                loader.classList.add('hidden');
+                btn.innerHTML = `<span class="inline-block w-2 h-2 bg-red-500 rounded-full animate-pulse mr-2"></span> LIVE`;
+                btn.classList.replace('bg-blue-600', 'bg-slate-800');
+                btn.classList.remove('hover:bg-blue-500');
+                
+                isRunning = true;
+                loop();
+
+            } catch (err) {
+                alert("Error: " + err.message);
+                loader.classList.add('hidden');
+                btn.disabled = false;
+            }
+        }
+
+        async function loop() {
+            const begin = Date.now();
+
+            if (!isRunning) return;
+
+            // Detect Poses
+            const poses = await detector.estimatePoses(video, {
+                maxPoses: CONFIG.maxPoses,
+                flipHorizontal: false
+            });
+
+            updateTrackers(poses);
+            draw();
+            updateUI();
+
+            const end = Date.now();
+            fpsDisplay.innerText = Math.round(1000 / (end - lastFrameTime || 1));
+            lastFrameTime = begin;
+
+            rafId = requestAnimationFrame(loop);
+        }
+
+        // --- TRACKING LOGIC ---
+        function updateTrackers(newPoses) {
+            const validPoses = newPoses.filter(p => p.score > CONFIG.minConfidence);
+            
+            // Simple Greedy Matching based on Euclidean distance of Nose
+            const usedPoses = new Set();
+            
+            students.forEach((student, id) => {
+                let bestDist = Infinity;
+                let bestPose = null;
+                let bestIndex = -1;
+
+                validPoses.forEach((pose, index) => {
+                    if (usedPoses.has(index)) return;
+                    
+                    // Calculate distance between old nose and new nose
+                    const oldNose = student.pose.keypoints.find(k => k.name === 'nose');
+                    const newNose = pose.keypoints.find(k => k.name === 'nose');
+                    
+                    if(oldNose && newNose) {
+                        const d = Vector.dist(oldNose, newNose);
+                        if (d < 150 && d < bestDist) { // 150px tracking threshold
+                            bestDist = d;
+                            bestPose = pose;
+                            bestIndex = index;
+                        }
+                    }
+                });
+
+                if (bestPose) {
+                    student.update(bestPose);
+                    usedPoses.add(bestIndex);
+                } else {
+                    student.missingFrames++;
+                }
+            });
+
+            // Remove lost students (gone for > 30 frames)
+            students.forEach((s, id) => {
+                if (s.missingFrames > 30) students.delete(id);
+            });
+
+            // Add new students
+            validPoses.forEach((pose, index) => {
+                if (!usedPoses.has(index)) {
+                    students.set(nextId++, new StudentTracker(nextId, pose));
+                }
+            });
+        }
+
+        // --- RENDERING ---
+        function draw() {
+            // Draw Video
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            // Darken slightly for contrast
+            ctx.fillStyle = "rgba(15, 23, 42, 0.4)";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            students.forEach(student => {
+                const p = student.pose;
+                const state = student.state;
+                const nose = p.keypoints.find(k => k.name === 'nose');
+                if(!nose) return;
+
+                const color = state.isRaisingHand ? '#fbbf24' : (state.isDistracted ? '#ef4444' : '#10b981');
+                
+                // 1. Draw Skeleton (Simplified)
+                const connections = [
+                    ['nose', 'left_eye'], ['nose', 'right_eye'],
+                    ['left_shoulder', 'right_shoulder'],
+                    ['left_shoulder', 'left_elbow'], ['left_elbow', 'left_wrist'],
+                    ['right_shoulder', 'right_elbow'], ['right_elbow', 'right_wrist']
+                ];
+
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = color;
+                ctx.globalAlpha = 0.7;
+                ctx.beginPath();
+                connections.forEach(([p1, p2]) => {
+                    const k1 = p.keypoints.find(k => k.name === p1);
+                    const k2 = p.keypoints.find(k => k.name === p2);
+                    if (k1 && k2 && k1.score > 0.3 && k2.score > 0.3) {
+                        ctx.moveTo(k1.x, k1.y);
+                        ctx.lineTo(k2.x, k2.y);
+                    }
+                });
+                ctx.stroke();
+
+                // 2. Bounding Box Logic (Estimating box from shoulders/nose)
+                const ls = p.keypoints.find(k => k.name === 'left_shoulder');
+                const rs = p.keypoints.find(k => k.name === 'right_shoulder');
+                if (ls && rs) {
+                    const width = Vector.dist(ls, rs) * 2.5;
+                    const height = width * 1.2;
+                    const x = nose.x - width / 2;
+                    const y = nose.y - width * 0.5;
+
+                    // Box Corners
+                    drawBracket(ctx, x, y, width, height, color);
+
+                    // 3. Floating Label
+                    ctx.globalAlpha = 1;
+                    ctx.font = "bold 12px Inter, sans-serif";
+                    const labelW = ctx.measureText(state.reason).width + 20;
+                    
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    ctx.roundRect(x + width/2 - labelW/2, y - 25, labelW, 20, 4);
+                    ctx.fill();
+                    
+                    ctx.fillStyle = "#000";
+                    ctx.fillText(state.reason.toUpperCase(), x + width/2 - labelW/2 + 10, y - 11);
+                }
+            });
+        }
+
+        function drawBracket(ctx, x, y, w, h, color) {
+            const len = w * 0.2;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            // Top Left
+            ctx.moveTo(x, y + len); ctx.lineTo(x, y); ctx.lineTo(x + len, y);
+            // Top Right
+            ctx.moveTo(x + w - len, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + len);
+            // Bottom Left
+            ctx.moveTo(x, y + h - len); ctx.lineTo(x, y + h); ctx.lineTo(x + len, y + h);
+            // Bottom Right
+            ctx.moveTo(x + w - len, y + h); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w, y + h - len);
+            ctx.stroke();
+        }
+
+        // --- UI UPDATES ---
+        function updateUI() {
+            document.getElementById('studentCount').innerText = students.size;
+
+            let totalScore = 0;
+            let activeCount = 0;
+            
+            // Clear List
+            studentList.innerHTML = '';
+
+            students.forEach(s => {
+                totalScore += s.state.focusScore;
+                activeCount++;
+
+                // Add Card
+                const div = document.createElement('div');
+                const statusColor = s.state.isRaisingHand ? 'bg-yellow-500' : (s.state.isDistracted ? 'bg-red-500' : 'bg-emerald-500');
+                const statusText = s.state.isDistracted ? 'DISTRACTED' : 'FOCUSED';
+                
+                div.className = "bg-slate-800/50 border border-slate-700 p-2 rounded flex items-center justify-between";
+                div.innerHTML = `
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 rounded bg-slate-700 flex items-center justify-center text-xs font-bold text-slate-400">
+                            #${s.id}
+                        </div>
+                        <div>
+                            <div class="text-xs font-bold text-slate-200 flex items-center gap-2">
+                                Student ${s.id}
+                                ${s.state.isRaisingHand ? '<span class="text-[9px] bg-yellow-500/20 text-yellow-400 px-1 rounded">HAND UP</span>' : ''}
+                            </div>
+                            <div class="text-[10px] text-slate-400">${s.state.reason}</div>
+                        </div>
+                    </div>
+                    <div class="flex flex-col items-end">
+                        <span class="text-xs font-mono font-bold ${s.state.isDistracted ? 'text-red-400' : 'text-emerald-400'}">${Math.round(s.state.focusScore)}%</span>
+                        <div class="w-16 h-1 bg-slate-700 rounded-full mt-1 overflow-hidden">
+                            <div class="h-full ${statusColor}" style="width: ${s.state.focusScore}%"></div>
+                        </div>
+                    </div>
+                `;
+                studentList.appendChild(div);
+            });
+
+            // Update Global Stats
+            const avg = activeCount > 0 ? Math.round(totalScore / activeCount) : 100;
+            const globalScoreEl = document.getElementById('globalScore');
+            globalScoreEl.innerText = avg + "%";
+            globalScoreEl.className = `text-xl font-mono font-bold ${avg > 70 ? 'text-emerald-400' : (avg > 40 ? 'text-yellow-400' : 'text-red-400')}`;
+
+            // Update Chart
+            if (Math.random() > 0.2) { // Throttle chart updates slightly
+                chartData.datasets[0].data.push(avg);
+                chartData.datasets[0].data.shift();
+                
+                // Dynamic Chart Color
+                const color = avg > 70 ? '#10b981' : (avg > 40 ? '#f59e0b' : '#ef4444');
+                chartData.datasets[0].borderColor = color;
+                chartData.datasets[0].backgroundColor = color + '1A'; // Hex alpha
+                
+                chartInstance.update('none'); // 'none' for performant update without animation
+            }
+        }
+    </script>
+</body>
+</html>
