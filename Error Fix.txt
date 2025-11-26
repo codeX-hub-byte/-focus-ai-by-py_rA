@@ -1,0 +1,5 @@
+1. System cannot modify:- Set-ExecutionPolicy RemoteSigned
+2. npm install -g http-server
+3. http-server --version
+4. To Run:- http-server
+
